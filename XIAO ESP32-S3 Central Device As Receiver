@@ -1,0 +1,125 @@
+# Central Device as Receiver
+#include <WiFi.h>
+#include <BLEDevice.h>
+#include <BLEScan.h>
+#include <BLEAdvertisedDevice.h>
+
+#define WIFI_SSID "Mohrisa_w6_2.4g"      // Replace with your WiFi SSID
+#define WIFI_PASSWORD "Mohrisa@2024"  // Replace with your WiFi Password
+#define SERVICE_UUID "0000abcd-0000-1000-8000-00805f9b34fb" // Common UUID for transmitters
+#define SCAN_TIME 5  // Scan duration in seconds
+#define MAX_DEVICES 10  // Max devices to track
+
+BLEScan *pBLEScan;
+
+// Structure to store device information
+struct BLEDeviceInfo {
+    std::string address;
+    float kalman_rssi;
+    float kalman_error;
+};
+
+// Device list
+BLEDeviceInfo trackedDevices[MAX_DEVICES];
+int deviceCount = 0;
+
+// Function to find a device in the trackedDevices array
+int findDevice(std::string address) {
+    for (int i = 0; i < deviceCount; i++) {
+        if (trackedDevices[i].address == address) {
+            return i;
+        }
+    }
+    return -1;  // Not found
+}
+
+// Kalman Filter for RSSI smoothing
+float kalmanFilter(int deviceIndex, float measured_rssi) {
+    float &kalman_rssi = trackedDevices[deviceIndex].kalman_rssi;
+    float &kalman_error = trackedDevices[deviceIndex].kalman_error;
+    float kalman_q = 0.5;
+    float kalman_r = 3;
+
+    kalman_error += kalman_q;
+    float gain = kalman_error / (kalman_error + kalman_r);
+    kalman_rssi = kalman_rssi + gain * (measured_rssi - kalman_rssi);
+    kalman_error = (1 - gain) * kalman_error;
+
+    return kalman_rssi;
+}
+
+// Distance estimation based on filtered RSSI
+float getDistance(float rssi) {
+    int A = -55;  // RSSI at 1 meter
+    float n = 2.0;
+    return pow(10, (A - rssi) / (10 * n));
+}
+
+// Callback class to handle discovered BLE devices
+class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
+    void onResult(BLEAdvertisedDevice advertisedDevice) {
+        if (advertisedDevice.haveServiceUUID() && advertisedDevice.isAdvertisingService(BLEUUID(SERVICE_UUID))) {
+            std::string address = std::string(advertisedDevice.getAddress().toString().c_str()); // ✅ Fixed Conversion
+            int raw_rssi = advertisedDevice.getRSSI();
+            
+            // Find or add device
+            int deviceIndex = findDevice(address);
+            if (deviceIndex == -1 && deviceCount < MAX_DEVICES) {
+                deviceIndex = deviceCount++;
+                trackedDevices[deviceIndex] = { address, raw_rssi, 5.0 };
+            }
+            
+            // Apply Kalman filter
+            float filtered_rssi = kalmanFilter(deviceIndex, raw_rssi);
+            float distance = getDistance(filtered_rssi);
+
+            // Print detected device info
+            Serial.println("----- BLE Device Found -----");
+            Serial.printf("Device Name: %s\n", advertisedDevice.getName().c_str());
+            Serial.printf("Address: %s\n", address.c_str());
+            Serial.printf("Raw RSSI: %d dBm\n", raw_rssi);
+            Serial.printf("Filtered RSSI (Kalman): %.2f dBm\n", filtered_rssi);
+            Serial.printf("Estimated Distance: %.2f meters\n", distance);
+            Serial.println("----------------------------");
+        }
+    }
+};
+
+// Function to connect to WiFi
+void connectToWiFi() {
+    Serial.println("Connecting to WiFi...");
+    WiFi.begin("Mohrisa_w6_2.4g", "Mohrisa@2024");
+
+    int timeout = 15;  // Timeout in seconds
+    while (WiFi.status() != WL_CONNECTED && timeout-- > 0) {
+        Serial.print(".");
+        delay(1000);
+    }
+
+    if (WiFi.status() == WL_CONNECTED) {
+        Serial.println("\nWiFi connected!");
+        Serial.print("IP Address: ");
+        Serial.println(WiFi.localIP());
+    } else {
+        Serial.println("\nFailed to connect to WiFi");
+    }
+}
+
+void setup() {
+    Serial.begin(115200);
+    Serial.println("Starting BLE Scanner...");
+
+    // Connect to WiFi
+    connectToWiFi();
+
+    BLEDevice::init("ESP32 BLE Receiver");
+    pBLEScan = BLEDevice::getScan();
+    pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
+    pBLEScan->setActiveScan(true);
+}
+
+void loop() {
+    Serial.println("Scanning for BLE devices...");
+    pBLEScan->start(SCAN_TIME, false);
+    delay(2000);
+}
